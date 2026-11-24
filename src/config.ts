@@ -9,4 +9,6 @@ export const config = {
   port: Number(process.env.PORT ?? 3000),
   dbFile: process.env.DB_FILE ?? "recif.db",
   adminApiKey: required("ADMIN_API_KEY"),
+  notifier: process.env.NOTIFIER, // console (par défaut) ou file
+  outboxFile: process.env.OUTBOX_FILE ?? "outbox.jsonl",
 };

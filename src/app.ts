@@ -10,6 +10,8 @@ import { fishRoutes } from "./routes/fish.routes.js";
 import { adoptionRoutes } from "./routes/adoption.routes.js";
 import { notFound } from "./middlewares/not-found.js";
 import { errorHandler } from "./middlewares/error-handler.js";
+import { createNotifier } from "./notifications/notifier.factory.js";
+import { config } from "./config.js";
 
 // Racine de composition : le seul endroit qui assemble les pièces.
 // Données → services → contrôleurs → routes, puis les middlewares.
@@ -18,11 +20,14 @@ export function createApp() {
   const fishDao = new SqliteFishDao(db);
   const adoptionDao = new SqliteAdoptionDao(db);
 
-  // 2. Les règles du Récif
-  const fishService = new FishService(fishDao);
-  const adoptionService = new AdoptionService(adoptionDao, fishDao);
+  // 2. Les services extérieurs : le canal de notification choisi dans la configuration
+  const notifier = createNotifier(config.notifier);
 
-  // 3. HTTP
+  // 3. Les règles du Récif
+  const fishService = new FishService(fishDao);
+  const adoptionService = new AdoptionService(adoptionDao, fishDao, notifier);
+
+  // 4. HTTP
   const app = express();
   app.use(express.json());
   app.use(fishRoutes(new FishController(fishService)));
