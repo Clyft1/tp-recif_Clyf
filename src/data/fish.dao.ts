@@ -8,7 +8,6 @@ export interface FishDao {
   create(data: NewFish): Promise<Fish>;
   update(id: number, changes: FishChanges): Promise<Fish | null>;
   delete(id: number): Promise<boolean>;
-  updateStatus(id: number, status: FishStatus): Promise<void>; // retiré à l'étape 6
 }
 
 // Une ligne telle qu'elle sort de SQLite (snake_case)
@@ -96,11 +95,12 @@ export class SqliteFishDao implements FishDao {
     return this.findById(id);
   }
 
+  // Deux tables touchées : les demandes du poisson, puis le poisson. Tout ou rien.
   async delete(id: number): Promise<boolean> {
-    return this.db.prepare("DELETE FROM fish WHERE id = ?").run(id).changes > 0;
-  }
-
-  async updateStatus(id: number, status: FishStatus): Promise<void> {
-    this.db.prepare("UPDATE fish SET status = ? WHERE id = ?").run(status, id);
+    const run = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(id);
+      return this.db.prepare("DELETE FROM fish WHERE id = ?").run(id).changes > 0;
+    });
+    return run();
   }
 }

@@ -49,8 +49,7 @@ export function createApp() {
   app.delete("/fish/:id", requireApiKey, async (req, res) => {
     const id = parseId(req.params.id);
     if (!(await fishes.findById(id))) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
-    await adoptions.deleteByFish(id);
-    await fishes.delete(id);
+    await fishes.delete(id); // supprime aussi ses demandes, dans une transaction
     res.status(204).end();
   });
 
@@ -62,10 +61,8 @@ export function createApp() {
     const fish = await fishes.findById(id);
     if (!fish) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
     if (fish.status !== "disponible") throw new AppError(409, "CONFLICT", "Ce poisson n'est plus disponible");
-    // Deux DAO appelés à la suite : c'est normal à ce stade (corrigé à l'étape 6)
-    const request = await adoptions.create({ fishId: id, adopterName: form.adopterName, adopterEmail: form.adopterEmail, message: form.message });
-    await fishes.updateStatus(id, "reserve");
-    res.status(201).json(request);
+    // Une seule opération de la DAL : la demande ET la réservation du poisson
+    res.status(201).json(await adoptions.create({ fishId: id, adopterName: form.adopterName, adopterEmail: form.adopterEmail, message: form.message }));
   });
 
   app.get("/adoptions", requireApiKey, async (req, res) => {
@@ -77,9 +74,7 @@ export function createApp() {
     const request = await adoptions.findById(id);
     if (!request) throw new AppError(404, "NOT_FOUND", `Demande ${id} introuvable`);
     if (request.status !== "en_attente") throw new AppError(409, "CONFLICT", "Demande déjà traitée");
-    await adoptions.setStatus(id, decision);
-    await fishes.updateStatus(request.fishId, decision === "acceptee" ? "adopte" : "disponible");
-    res.json(await adoptions.findById(id));
+    res.json(decision === "acceptee" ? await adoptions.accept(id) : await adoptions.refuse(id));
   };
 
   app.post("/adoptions/:id/accept", requireApiKey, decide("acceptee"));

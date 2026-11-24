@@ -1,13 +1,15 @@
 import type { Database } from "better-sqlite3";
+import type { FishStatus } from "../models/fish.js";
 import type { AdoptionFilters, AdoptionRequest, AdoptionStatus, NewAdoptionRequest } from "../models/adoption-request.js";
 
+// Les opérations qui touchent deux tables sont maintenant des méthodes de la DAL, en transaction
 export interface AdoptionDao {
   findAll(filters?: AdoptionFilters): Promise<AdoptionRequest[]>;
   findById(id: number): Promise<AdoptionRequest | null>;
   findByFish(fishId: number): Promise<AdoptionRequest[]>;
-  create(data: NewAdoptionRequest): Promise<AdoptionRequest>;
-  setStatus(id: number, status: AdoptionStatus): Promise<void>; // retiré à l'étape 6
-  deleteByFish(fishId: number): Promise<void>; // retiré à l'étape 6
+  create(data: NewAdoptionRequest): Promise<AdoptionRequest>; // + poisson « reserve »
+  accept(id: number): Promise<AdoptionRequest>; // + poisson « adopte »
+  refuse(id: number): Promise<AdoptionRequest>; // + poisson « disponible »
 }
 
 type AdoptionRow = {
@@ -43,8 +45,7 @@ export class SqliteAdoptionDao implements AdoptionDao {
   }
 
   async findById(id: number): Promise<AdoptionRequest | null> {
-    const row = this.db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id) as AdoptionRow | undefined;
-    return row ? toAdoptionRequest(row) : null;
+    return this.selectById(id);
   }
 
   async findByFish(fishId: number): Promise<AdoptionRequest[]> {
@@ -52,23 +53,44 @@ export class SqliteAdoptionDao implements AdoptionDao {
     return rows.map(toAdoptionRequest);
   }
 
+  // better-sqlite3 : tout ce qui est dans la fonction réussit ensemble, ou rien
   async create(data: NewAdoptionRequest): Promise<AdoptionRequest> {
-    const info = this.db
-      .prepare(
-        `INSERT INTO adoption_requests (fish_id, adopter_name, adopter_email, message, status, created_at)
-         VALUES (@fishId, @adopterName, @adopterEmail, @message, 'en_attente', @createdAt)`,
-      )
-      .run({ ...data, message: data.message ?? "", createdAt: new Date().toISOString() });
-    return (await this.findById(Number(info.lastInsertRowid)))!;
+    const run = this.db.transaction(() => {
+      const info = this.db
+        .prepare(
+          `INSERT INTO adoption_requests (fish_id, adopter_name, adopter_email, message, status, created_at)
+           VALUES (@fishId, @adopterName, @adopterEmail, @message, 'en_attente', @createdAt)`,
+        )
+        .run({ ...data, message: data.message ?? "", createdAt: new Date().toISOString() });
+      this.db.prepare("UPDATE fish SET status = 'reserve' WHERE id = ?").run(data.fishId);
+      return this.selectById(Number(info.lastInsertRowid))!;
+    });
+    return run();
   }
 
-  async setStatus(id: number, status: AdoptionStatus): Promise<void> {
-    this.db
-      .prepare("UPDATE adoption_requests SET status = ?, decided_at = ? WHERE id = ?")
-      .run(status, new Date().toISOString(), id);
+  async accept(id: number): Promise<AdoptionRequest> {
+    return this.decide(id, "acceptee", "adopte");
   }
 
-  async deleteByFish(fishId: number): Promise<void> {
-    this.db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(fishId);
+  async refuse(id: number): Promise<AdoptionRequest> {
+    return this.decide(id, "refusee", "disponible");
+  }
+
+  // Accepter et refuser ne diffèrent que par deux statuts : une seule méthode (DRY)
+  private decide(id: number, status: AdoptionStatus, fishStatus: FishStatus): AdoptionRequest {
+    const run = this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE adoption_requests SET status = ?, decided_at = ? WHERE id = ?")
+        .run(status, new Date().toISOString(), id);
+      const request = this.selectById(id)!;
+      this.db.prepare("UPDATE fish SET status = ? WHERE id = ?").run(fishStatus, request.fishId);
+      return request;
+    });
+    return run();
+  }
+
+  private selectById(id: number): AdoptionRequest | null {
+    const row = this.db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id) as AdoptionRow | undefined;
+    return row ? toAdoptionRequest(row) : null;
   }
 }
