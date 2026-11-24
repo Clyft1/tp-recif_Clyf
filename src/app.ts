@@ -1,14 +1,14 @@
-import express, { type Request } from "express";
-import { config } from "./config.js";
+import express from "express";
 import { db } from "./data/db.js";
 import { buildWhere } from "./utils/query-helper.js";
+import { AppError } from "./errors/app-error.js";
+import { requireApiKey } from "./middlewares/require-api-key.js";
+import { notFound } from "./middlewares/not-found.js";
+import { errorHandler } from "./middlewares/error-handler.js";
 import { parseId } from "./schemas/common.js";
-import { validate } from "./schemas/validation.js";
+import { parse } from "./schemas/validation.js";
 import { fishSchema } from "./schemas/fish.schema.js";
 import { adoptionSchema } from "./schemas/adoption.schema.js";
-
-// La clé d'API est comparée à un seul endroit, à la valeur de la configuration
-const isStaff = (req: Request) => req.get("X-Api-Key") === config.adminApiKey;
 
 // Les noms de champs de l'API (camelCase) et les colonnes de la table (snake_case)
 const FISH_COLUMNS: Record<string, string> = {
@@ -23,106 +23,52 @@ const FISH_COLUMNS: Record<string, string> = {
 export function createApp() {
   const app = express();
 
+  // Branché une seule fois, avant toutes les routes
+  app.use(express.json());
+
   // ---------------------------------------------------------------- POISSONS
 
-  // Liste des poissons, avec filtres ?species= et ?status=
   app.get("/fish", (req, res) => {
-    try {
-      const filters: any = {};
-      if (req.query.species) filters.species = { op: "eq", value: req.query.species };
-      if (req.query.status) filters.status = { op: "eq", value: req.query.status };
-      const rows = db.prepare("SELECT * FROM fish " + buildWhere(filters) + " ORDER BY id").all();
-      res.json(rows);
-    } catch (e) {
-      console.log(e);
-      res.status(500).send("Erreur");
-    }
+    const filters: any = {};
+    if (req.query.species) filters.species = { op: "eq", value: req.query.species };
+    if (req.query.status) filters.status = { op: "eq", value: req.query.status };
+    const rows = db.prepare("SELECT * FROM fish " + buildWhere(filters) + " ORDER BY id").all();
+    res.json(rows);
   });
 
-  // Détail d'un poisson, avec ses demandes d'adoption
   app.get("/fish/:id", (req, res) => {
     const id = parseId(req.params.id);
-    if (id === null) {
-      res.status(400).json({ message: "Identifiant invalide" });
-      return;
-    }
     const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
-    if (!fish) {
-      res.status(404).send("Poisson introuvable");
-      return;
-    }
+    if (!fish) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
     fish.requests = db.prepare("SELECT * FROM adoption_requests WHERE fish_id = ?").all(id);
     res.json(fish);
   });
 
-  // Ajout d'un poisson (équipe du Récif)
-  app.post("/fish", express.json(), (req, res) => {
-    if (!isStaff(req)) {
-      res.status(401).json({ message: "Non autorisé" });
-      return;
-    }
-    const result = validate(fishSchema, req.body);
-    if (!result.ok) {
-      res.status(400).json({ message: "Données invalides", errors: result.errors });
-      return;
-    }
-    const b = result.data;
+  app.post("/fish", requireApiKey, (req, res) => {
+    const b = parse(fishSchema, req.body);
     const info = db
       .prepare(
         "INSERT INTO fish (name, species, breed, birth_date, description, internal_notes, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'disponible', ?)",
       )
       .run(b.name, b.species, b.breed ?? null, b.birthDate ?? null, b.description ?? "", b.internalNotes ?? "", new Date().toISOString());
-    const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json(fish);
+    res.status(201).json(db.prepare("SELECT * FROM fish WHERE id = ?").get(info.lastInsertRowid));
   });
 
-  // Modification d'un poisson (équipe du Récif)
-  app.put("/fish/:id", express.json(), (req, res) => {
-    if (!isStaff(req)) {
-      res.status(401).json({ error: "Clé API manquante" });
-      return;
-    }
+  app.put("/fish/:id", requireApiKey, (req, res) => {
     const id = parseId(req.params.id);
-    if (id === null) {
-      res.status(400).json({ message: "Identifiant invalide" });
-      return;
-    }
-    const result = validate(fishSchema, req.body, { partial: true });
-    if (!result.ok) {
-      res.status(400).json({ message: "Données invalides", errors: result.errors });
-      return;
-    }
-    const existing = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
-    if (!existing) {
-      res.status(404).json({ error: "Poisson introuvable" });
-      return;
-    }
-    // On ne met à jour QUE les champs validés par le schéma, jamais les clés reçues
-    const keys = Object.keys(result.data);
+    const changes = parse(fishSchema, req.body, { partial: true });
+    if (!db.prepare("SELECT * FROM fish WHERE id = ?").get(id)) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
+    const keys = Object.keys(changes);
     if (keys.length > 0) {
       const sets = keys.map((k) => FISH_COLUMNS[k] + " = ?").join(", ");
-      db.prepare("UPDATE fish SET " + sets + " WHERE id = ?").run(...keys.map((k) => result.data[k]), id);
+      db.prepare("UPDATE fish SET " + sets + " WHERE id = ?").run(...keys.map((k) => changes[k]), id);
     }
-    const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
-    res.json(fish);
+    res.json(db.prepare("SELECT * FROM fish WHERE id = ?").get(id));
   });
 
-  // Suppression d'un poisson (équipe du Récif)
-  app.delete("/fish/:id", (req, res) => {
-    if (!isStaff(req)) {
-      res.status(401).send("Non autorisé");
-      return;
-    }
+  app.delete("/fish/:id", requireApiKey, (req, res) => {
     const id = parseId(req.params.id);
-    if (id === null) {
-      res.status(400).json({ message: "Identifiant invalide" });
-      return;
-    }
-    const fish = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
-    if (!fish) {
-      res.status(404).json({ message: "Poisson introuvable" });
-      return;
-    }
+    if (!db.prepare("SELECT * FROM fish WHERE id = ?").get(id)) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
     db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(id);
     db.prepare("DELETE FROM fish WHERE id = ?").run(id);
     res.status(204).end();
@@ -130,79 +76,44 @@ export function createApp() {
 
   // ---------------------------------------------------------------- ADOPTIONS
 
-  // Demande d'adoption (public)
-  app.post("/fish/:id/adoptions", express.json(), (req, res) => {
+  app.post("/fish/:id/adoptions", (req, res) => {
     const id = parseId(req.params.id);
-    if (id === null) {
-      res.status(400).json({ message: "Identifiant invalide" });
-      return;
-    }
-    const result = validate(adoptionSchema, req.body);
-    if (!result.ok) {
-      res.status(400).json({ message: "Données invalides", errors: result.errors });
-      return;
-    }
-    const b = result.data;
+    const b = parse(adoptionSchema, req.body);
     const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
-    if (!fish) {
-      res.status(404).json({ message: "Poisson introuvable" });
-      return;
-    }
-    if (fish.status !== "disponible") {
-      res.status(409).json({ error: "Ce poisson n'est plus disponible" });
-      return;
-    }
+    if (!fish) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
+    if (fish.status !== "disponible") throw new AppError(409, "CONFLICT", "Ce poisson n'est plus disponible");
     const info = db
       .prepare(
         "INSERT INTO adoption_requests (fish_id, adopter_name, adopter_email, message, status, created_at) VALUES (?, ?, ?, ?, 'en_attente', ?)",
       )
       .run(id, b.adopterName, b.adopterEmail, b.message ?? "", new Date().toISOString());
     db.prepare("UPDATE fish SET status = 'reserve' WHERE id = ?").run(id);
-    const request = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(info.lastInsertRowid);
-    res.status(201).json(request);
+    res.status(201).json(db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(info.lastInsertRowid));
   });
 
-  // Liste des demandes (équipe du Récif), filtre ?status=
-  app.get("/adoptions", (req, res) => {
-    if (!isStaff(req)) {
-      res.status(401).json({ message: "Non autorisé" });
-      return;
-    }
+  app.get("/adoptions", requireApiKey, (req, res) => {
     const filters: any = {};
     if (req.query.status) filters.status = { op: "eq", value: req.query.status };
-    const rows = db.prepare("SELECT * FROM adoption_requests " + buildWhere(filters) + " ORDER BY id").all();
-    res.json(rows);
+    res.json(db.prepare("SELECT * FROM adoption_requests " + buildWhere(filters) + " ORDER BY id").all());
   });
 
-  // Accepter ou refuser : UNE seule fonction, paramétrée par la décision
-  const decide = (decision: "acceptee" | "refusee") => (req: express.Request, res: express.Response) => {
-    if (!isStaff(req)) {
-      res.status(401).json({ message: "Non autorisé" });
-      return;
-    }
+  const decide = (decision: "acceptee" | "refusee"): express.RequestHandler => (req, res) => {
     const id = parseId(req.params.id);
-    if (id === null) {
-      res.status(400).json({ message: "Identifiant invalide" });
-      return;
-    }
     const request: any = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id);
-    if (!request) {
-      res.status(404).json({ message: "Demande introuvable" });
-      return;
-    }
-    if (request.status !== "en_attente") {
-      res.status(409).json({ message: "Demande déjà traitée" });
-      return;
-    }
+    if (!request) throw new AppError(404, "NOT_FOUND", `Demande ${id} introuvable`);
+    if (request.status !== "en_attente") throw new AppError(409, "CONFLICT", "Demande déjà traitée");
     const fishStatus = decision === "acceptee" ? "adopte" : "disponible";
     db.prepare("UPDATE adoption_requests SET status = ?, decided_at = ? WHERE id = ?").run(decision, new Date().toISOString(), id);
     db.prepare("UPDATE fish SET status = ? WHERE id = ?").run(fishStatus, request.fish_id);
-    const updated = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id);
-    res.json(updated);
+    res.json(db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id));
   };
 
-  app.post("/adoptions/:id/accept", decide("acceptee"));
-  app.post("/adoptions/:id/refuse", decide("refusee"));
+  app.post("/adoptions/:id/accept", requireApiKey, decide("acceptee"));
+  app.post("/adoptions/:id/refuse", requireApiKey, decide("refusee"));
+
+  // Après toutes les routes : la 404, puis le gestionnaire d'erreurs en tout dernier
+  app.use(notFound);
+  app.use(errorHandler);
 
   return app;
 }

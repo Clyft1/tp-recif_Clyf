@@ -1,3 +1,5 @@
+import { AppError } from "../errors/app-error.js";
+
 // Boîte à outils de validation : chaque règle est écrite une seule fois.
 // Une règle reçoit une valeur et renvoie un message d'erreur, ou null si tout va bien.
 export type Rule = (value: unknown) => string | null;
@@ -46,4 +48,11 @@ export function validate<T = Record<string, any>>(
   }
   // Les champs qui ne sont PAS dans le schéma ne sont jamais recopiés.
   return errors.length > 0 ? { ok: false, errors } : { ok: true, data: data as T };
+}
+
+// Comme validate, mais lève une AppError 400 au lieu de renvoyer la liste des erreurs
+export function parse<T = Record<string, any>>(schema: Schema, input: unknown, options: { partial?: boolean } = {}): T {
+  const result = validate<T>(schema, input, options);
+  if (!result.ok) throw new AppError(400, "VALIDATION_ERROR", result.errors.join(" ; "));
+  return result.data;
 }
