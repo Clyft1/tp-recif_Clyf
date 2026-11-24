@@ -1,0 +1,12 @@
+node_modules/
+
+.env
+.env.*
+!.env.example
+
+/recif.db
+/recif.db-shm
+/recif.db-wal
+/tmp/test.db
+/tmp/test.db-shm
+/tmp/test.db-wal
