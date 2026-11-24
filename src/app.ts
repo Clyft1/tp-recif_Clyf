@@ -1,6 +1,7 @@
 import express from "express";
 import { db } from "./data/db.js";
-import { buildWhere } from "./utils/query-helper.js";
+import { SqliteFishDao } from "./data/fish.dao.js";
+import { SqliteAdoptionDao } from "./data/adoption.dao.js";
 import { AppError } from "./errors/app-error.js";
 import { requireApiKey } from "./middlewares/require-api-key.js";
 import { notFound } from "./middlewares/not-found.js";
@@ -9,109 +10,81 @@ import { parseId } from "./schemas/common.js";
 import { parse } from "./schemas/validation.js";
 import { fishSchema } from "./schemas/fish.schema.js";
 import { adoptionSchema } from "./schemas/adoption.schema.js";
-
-// Les noms de champs de l'API (camelCase) et les colonnes de la table (snake_case)
-const FISH_COLUMNS: Record<string, string> = {
-  name: "name",
-  species: "species",
-  breed: "breed",
-  birthDate: "birth_date",
-  description: "description",
-  internalNotes: "internal_notes",
-};
+import type { FishChanges, FishFilters, NewFish } from "./models/fish.js";
+import type { AdoptionFilters } from "./models/adoption-request.js";
 
 export function createApp() {
   const app = express();
+  const fishes = new SqliteFishDao(db);
+  const adoptions = new SqliteAdoptionDao(db);
 
-  // Branché une seule fois, avant toutes les routes
   app.use(express.json());
 
   // ---------------------------------------------------------------- POISSONS
 
-  app.get("/fish", (req, res) => {
-    const filters: any = {};
-    if (req.query.species) filters.species = { op: "eq", value: req.query.species };
-    if (req.query.status) filters.status = { op: "eq", value: req.query.status };
-    const rows = db.prepare("SELECT * FROM fish " + buildWhere(filters) + " ORDER BY id").all();
-    res.json(rows);
+  app.get("/fish", async (req, res) => {
+    res.json(await fishes.findAll(req.query as FishFilters));
   });
 
-  app.get("/fish/:id", (req, res) => {
+  app.get("/fish/:id", async (req, res) => {
     const id = parseId(req.params.id);
-    const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
+    const fish = await fishes.findById(id);
     if (!fish) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
-    fish.requests = db.prepare("SELECT * FROM adoption_requests WHERE fish_id = ?").all(id);
+    res.json({ ...fish, requests: await adoptions.findByFish(id) });
+  });
+
+  app.post("/fish", requireApiKey, async (req, res) => {
+    const data = parse<NewFish>(fishSchema, req.body);
+    res.status(201).json(await fishes.create(data));
+  });
+
+  app.put("/fish/:id", requireApiKey, async (req, res) => {
+    const id = parseId(req.params.id);
+    const changes = parse<FishChanges>(fishSchema, req.body, { partial: true });
+    const fish = await fishes.update(id, changes);
+    if (!fish) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
     res.json(fish);
   });
 
-  app.post("/fish", requireApiKey, (req, res) => {
-    const b = parse(fishSchema, req.body);
-    const info = db
-      .prepare(
-        "INSERT INTO fish (name, species, breed, birth_date, description, internal_notes, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'disponible', ?)",
-      )
-      .run(b.name, b.species, b.breed ?? null, b.birthDate ?? null, b.description ?? "", b.internalNotes ?? "", new Date().toISOString());
-    res.status(201).json(db.prepare("SELECT * FROM fish WHERE id = ?").get(info.lastInsertRowid));
-  });
-
-  app.put("/fish/:id", requireApiKey, (req, res) => {
+  app.delete("/fish/:id", requireApiKey, async (req, res) => {
     const id = parseId(req.params.id);
-    const changes = parse(fishSchema, req.body, { partial: true });
-    if (!db.prepare("SELECT * FROM fish WHERE id = ?").get(id)) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
-    const keys = Object.keys(changes);
-    if (keys.length > 0) {
-      const sets = keys.map((k) => FISH_COLUMNS[k] + " = ?").join(", ");
-      db.prepare("UPDATE fish SET " + sets + " WHERE id = ?").run(...keys.map((k) => changes[k]), id);
-    }
-    res.json(db.prepare("SELECT * FROM fish WHERE id = ?").get(id));
-  });
-
-  app.delete("/fish/:id", requireApiKey, (req, res) => {
-    const id = parseId(req.params.id);
-    if (!db.prepare("SELECT * FROM fish WHERE id = ?").get(id)) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
-    db.prepare("DELETE FROM adoption_requests WHERE fish_id = ?").run(id);
-    db.prepare("DELETE FROM fish WHERE id = ?").run(id);
+    if (!(await fishes.findById(id))) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
+    await adoptions.deleteByFish(id);
+    await fishes.delete(id);
     res.status(204).end();
   });
 
   // ---------------------------------------------------------------- ADOPTIONS
 
-  app.post("/fish/:id/adoptions", (req, res) => {
+  app.post("/fish/:id/adoptions", async (req, res) => {
     const id = parseId(req.params.id);
-    const b = parse(adoptionSchema, req.body);
-    const fish: any = db.prepare("SELECT * FROM fish WHERE id = ?").get(id);
+    const form = parse(adoptionSchema, req.body);
+    const fish = await fishes.findById(id);
     if (!fish) throw new AppError(404, "NOT_FOUND", `Poisson ${id} introuvable`);
     if (fish.status !== "disponible") throw new AppError(409, "CONFLICT", "Ce poisson n'est plus disponible");
-    const info = db
-      .prepare(
-        "INSERT INTO adoption_requests (fish_id, adopter_name, adopter_email, message, status, created_at) VALUES (?, ?, ?, ?, 'en_attente', ?)",
-      )
-      .run(id, b.adopterName, b.adopterEmail, b.message ?? "", new Date().toISOString());
-    db.prepare("UPDATE fish SET status = 'reserve' WHERE id = ?").run(id);
-    res.status(201).json(db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(info.lastInsertRowid));
+    // Deux DAO appelés à la suite : c'est normal à ce stade (corrigé à l'étape 6)
+    const request = await adoptions.create({ fishId: id, adopterName: form.adopterName, adopterEmail: form.adopterEmail, message: form.message });
+    await fishes.updateStatus(id, "reserve");
+    res.status(201).json(request);
   });
 
-  app.get("/adoptions", requireApiKey, (req, res) => {
-    const filters: any = {};
-    if (req.query.status) filters.status = { op: "eq", value: req.query.status };
-    res.json(db.prepare("SELECT * FROM adoption_requests " + buildWhere(filters) + " ORDER BY id").all());
+  app.get("/adoptions", requireApiKey, async (req, res) => {
+    res.json(await adoptions.findAll(req.query as AdoptionFilters));
   });
 
-  const decide = (decision: "acceptee" | "refusee"): express.RequestHandler => (req, res) => {
+  const decide = (decision: "acceptee" | "refusee"): express.RequestHandler => async (req, res) => {
     const id = parseId(req.params.id);
-    const request: any = db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id);
+    const request = await adoptions.findById(id);
     if (!request) throw new AppError(404, "NOT_FOUND", `Demande ${id} introuvable`);
     if (request.status !== "en_attente") throw new AppError(409, "CONFLICT", "Demande déjà traitée");
-    const fishStatus = decision === "acceptee" ? "adopte" : "disponible";
-    db.prepare("UPDATE adoption_requests SET status = ?, decided_at = ? WHERE id = ?").run(decision, new Date().toISOString(), id);
-    db.prepare("UPDATE fish SET status = ? WHERE id = ?").run(fishStatus, request.fish_id);
-    res.json(db.prepare("SELECT * FROM adoption_requests WHERE id = ?").get(id));
+    await adoptions.setStatus(id, decision);
+    await fishes.updateStatus(request.fishId, decision === "acceptee" ? "adopte" : "disponible");
+    res.json(await adoptions.findById(id));
   };
 
   app.post("/adoptions/:id/accept", requireApiKey, decide("acceptee"));
   app.post("/adoptions/:id/refuse", requireApiKey, decide("refusee"));
 
-  // Après toutes les routes : la 404, puis le gestionnaire d'erreurs en tout dernier
   app.use(notFound);
   app.use(errorHandler);
 

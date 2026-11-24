@@ -1,6 +1,5 @@
+import { SPECIES } from "../models/fish.js";
 import { isoDate, oneOf, optional, text, type Schema } from "./validation.js";
-
-export const SPECIES = ["koi", "betta", "poisson-rouge", "guppy"] as const;
 
 // Un poisson est décrit UNE fois, pour la création comme pour la modification
 export const fishSchema: Schema = {
