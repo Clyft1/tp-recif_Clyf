@@ -8,3 +8,4 @@ node_modules/
 /recif.db-shm
 /recif.db-wal
 /tmp/
+/outbox.jsonl
