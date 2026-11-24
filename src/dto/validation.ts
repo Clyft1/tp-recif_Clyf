@@ -30,14 +30,21 @@ export const optional = (rule: Rule): Rule => (value) =>
 
 export type ValidationResult<T> = { ok: true; data: T } | { ok: false; errors: string[] };
 
-export function validate<T = Record<string, any>>(
-  schema: Schema,
-  input: unknown,
-  options: { partial?: boolean } = {}, // partial : pour une modification
-): ValidationResult<T> {
+export type ValidationOptions = {
+  partial?: boolean; // pour une modification : les champs absents sont ignorés
+  strict?: boolean; // un champ qui n'est pas dans le schéma (status, id…) est une erreur
+};
+
+export function validate<T = Record<string, any>>(schema: Schema, input: unknown, options: ValidationOptions = {}): ValidationResult<T> {
   const body = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const data: Record<string, unknown> = {};
   const errors: string[] = [];
+
+  if (options.strict) {
+    for (const field of Object.keys(body)) {
+      if (!(field in schema)) errors.push(`${field} : champ non autorisé`);
+    }
+  }
 
   for (const [field, rule] of Object.entries(schema)) {
     const value = body[field];
@@ -51,7 +58,7 @@ export function validate<T = Record<string, any>>(
 }
 
 // Comme validate, mais lève une AppError 400 au lieu de renvoyer la liste des erreurs
-export function parse<T = Record<string, any>>(schema: Schema, input: unknown, options: { partial?: boolean } = {}): T {
+export function parse<T = Record<string, any>>(schema: Schema, input: unknown, options: ValidationOptions = {}): T {
   const result = validate<T>(schema, input, options);
   if (!result.ok) throw new AppError(400, "VALIDATION_ERROR", result.errors.join(" ; "));
   return result.data;

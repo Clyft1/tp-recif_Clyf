@@ -1,30 +1,35 @@
 import type { RequestHandler } from "express";
 import type { FishChanges, FishFilters, NewFish } from "../models/fish.js";
-import { parseId } from "../schemas/common.js";
-import { fishSchema } from "../schemas/fish.schema.js";
-import { parse } from "../schemas/validation.js";
+import { parseId } from "../dto/common.js";
+import { fishFiltersSchema, fishSchema, toFishPublicDto, toFishStaffDto } from "../dto/fish.dto.js";
+import { parse } from "../dto/validation.js";
 import type { FishService } from "../services/fish.service.js";
 
-// Le contrôleur traduit HTTP ↔ service : il lit la requête, appelle le service, répond.
+// DTO d'entrée → service → DTO de sortie : c'est la « vue » du MVC.
 // Méthodes fléchées : `this` reste lié quand Express les appelle.
 export class FishController {
   constructor(private readonly fishes: FishService) {}
 
+  // Public
   list: RequestHandler = async (req, res) => {
-    res.json(await this.fishes.list(req.query as FishFilters));
+    const filters = parse<FishFilters>(fishFiltersSchema, req.query, { partial: true });
+    res.json((await this.fishes.list(filters)).map(toFishPublicDto));
   };
 
   getOne: RequestHandler = async (req, res) => {
-    res.json(await this.fishes.get(parseId(req.params.id)));
+    res.json(toFishPublicDto(await this.fishes.get(parseId(req.params.id))));
   };
 
+  // Personnel
   create: RequestHandler = async (req, res) => {
-    res.status(201).json(await this.fishes.create(parse<NewFish>(fishSchema, req.body)));
+    const data = parse<NewFish>(fishSchema, req.body, { strict: true });
+    res.status(201).json(toFishStaffDto(await this.fishes.create(data)));
   };
 
   update: RequestHandler = async (req, res) => {
     const id = parseId(req.params.id);
-    res.json(await this.fishes.update(id, parse<FishChanges>(fishSchema, req.body, { partial: true })));
+    const changes = parse<FishChanges>(fishSchema, req.body, { partial: true, strict: true });
+    res.json(toFishStaffDto(await this.fishes.update(id, changes)));
   };
 
   remove: RequestHandler = async (req, res) => {
